@@ -1046,6 +1046,20 @@ def IndexM.inDocstring (declName : Name) (act : IndexM Literate α) : IndexM Lit
   withReader (fun (iCtx, tCtx) => (iCtx.push ctxHeader, tCtx)) act
 
 
+/--
+Saves a document to the index, merging its content into an existing document with the same ID
+instead of failing.
+
+A declaration can have more than one docstring item: `@[to_additive Foo /-- ... -/] def Bar` yields
+a docstring for `Foo` and a docstring for `Bar` that both belong to the same syntax, and both link
+to the same place. Both are worth searching, so their text is concatenated.
+-/
+def IndexM.saveMerging (doc : IndexDoc) : IndexM Literate Unit := do
+  if let some prev := (← get)[doc.id]? then
+    modify (·.insert doc.id { prev with content := prev.content ++ "\n\n" ++ doc.content })
+  else
+    IndexM.save doc
+
 partial def mkIndex (traverseContext : Context) (traverseState : State) (dir : Dir) :
     Except String (Index × Array IndexDoc) :=
   go dir |>.finalize traverseContext
@@ -1062,12 +1076,12 @@ where
               let content ← IndexM.inDocstring declName  do
                 let content ← xs.text.foldlM (init := "") fun s b => do return s ++ (← blockText b) ++ "\n\n"
                 xs.subsections.foldlM (init := content) fun s p' => do return s ++ (← partText p') ++ "\n\n"
-              IndexM.save {id := id.link, header := declName.toString, context, content}
+              IndexM.saveMerging {id := id.link, header := declName.toString, context, content}
           | .verso .. => pure () -- Don't index things we can't link to anyway
           | .markdown _ (some declName) xs =>
             if let some id := traverseState.constLink declName then
               let context ← IndexM.currentContext
-              IndexM.save {id := id.link, header := declName.toString, context, content := mdIndex xs}
+              IndexM.saveMerging {id := id.link, header := declName.toString, context, content := mdIndex xs}
           | .markdown .. => pure () -- Don't index things we can't link to anyway
           | .modDoc doc =>
             if let some id := traverseState.modDocLink m.name itemIdx codeIdx then
