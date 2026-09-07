@@ -140,6 +140,15 @@ def findHighestM [Monad m] (stx : Syntax) (fn : Syntax → Option α) : m (Array
 
   return #[]
 
+/-- Whether `range` lies within an attribute instance (the contents of `@[...]`) in `stx`. -/
+partial def insideAttrInstance (stx : Syntax) (range : Syntax.Range) : Bool :=
+  match stx with
+  | .node _ kind args =>
+    (kind == ``Lean.Parser.Term.attrInstance &&
+      (stx.getRange?.map (·.includes range true true) |>.getD false)) ||
+    args.any (insideAttrInstance · range)
+  | _ => false
+
 /--
 Finds the definition sites of each constant in an info tree, and replaces each docstring with a
 reference to the definition for later substitution.
@@ -157,6 +166,24 @@ def findDocstringDefs (stx : Syntax) (t : InfoTree) : TermElabM Syntax := do
     | _ => none
   let defSites ← defSites.filterM fun x => do
     return (← findInternalDocString? (← getEnv) x.1) |>.isSome
+  -- An attribute can define a further constant with a doc comment of its own, as in
+  -- `@[to_additive foo /-- ... -/] def bar`. The `declModifiers` node contains that attribute along
+  -- with `bar`'s own doc comment, but not `bar`'s definition site, so `foo` would be the only
+  -- definition site in it and `bar`'s doc comment would be attributed to `foo`. Doc comments inside
+  -- attributes are therefore handled first, by the attribute, and the definition sites in
+  -- attributes are set aside for the rest of the command.
+  let (attrSites, defSites) := defSites.partition fun (_, site) =>
+    site.getRange?.map (insideAttrInstance stx ·) |>.getD false
+  let stx ← stx.replaceM fun s => do
+    if s.isOfKind ``Lean.Parser.Term.attrInstance then
+      if let some range := s.getRange? then
+        let includes := attrSites.filter (·.2.getRange?.map (range.includes · true true) |>.getD false)
+        if let [(x, _)] := includes then
+          return some (← s.replaceM fun s' => do
+            if s'.isOfKind ``docComment then
+              rewriteComment x s'
+            else pure none)
+    pure none
   -- Now find the largest syntax object that contains just one of these definition sites and replace
   -- all doc comments with a placeholder token
   let stx ← stx.replaceM fun s => do
